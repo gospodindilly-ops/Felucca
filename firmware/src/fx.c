@@ -504,7 +504,16 @@ static void rev_clear(void)
     hl.x = hl.m = hl.s = hl.hp = hl.he = 0;
 }
 
-static int32_t part_buf[CTL];                            /* a part's block (mix_part); the fade of a model change */
+/* the dry mix and the sends, as each core adds its parts into them (after Jangada: mx[1] is the second core's,
+ * mix_block), and a part's own block (b; mx[0].b also the fade of a reverb model change, after the parts) */
+typedef struct { int32_t l[CTL], r[CTL], c[CTL], d[CTL], v[CTL], b[CTL]; } mixsum_t;
+static mixsum_t mx[2];
+#define mix_l (mx[0].l)
+#define mix_r (mx[0].r)
+#define send_c (mx[0].c)
+#define send_d (mx[0].d)
+#define send_r (mx[0].v)
+#define part_buf (mx[0].b)
 
 /* the model changed (to rt): the old one's block fades out (HALL's stereo difference with it), its buffers are
  * cleared, the new one starts from silence */
@@ -780,7 +789,7 @@ static __attribute__((noinline)) void track_insert(track_t *t, int32_t *b, uint3
 /* one block of the whole mix (shared with hostsim.c): events -> each part (with its modulation matrix)
  * -> dist -> INSERT -> SLICER -> level / pan / sends -> buses -> master; out: stereo Q15 */
 static void events_block(uint32_t n);                    /* seq.c */
-static int32_t send_c[CTL], send_d[CTL], send_r[CTL], wet[CTL], mix_l[CTL], mix_r[CTL];
+static int32_t wet[CTL];                                 /* (the dry mix and the sends: mx[0], above) */
 
 /* SPREAD (#148): a POLY or UNISON part whose SPRD is above 0. Its voices start left and right of PAN in turn (voice.c
  * voice_start; UNISON's detuned voices alternate), at PAN -/+ SPRD / 2 (SPRD 127: hard left and right), with the pan
@@ -791,9 +800,9 @@ static int32_t send_c[CTL], send_d[CTL], send_r[CTL], wet[CTL], mix_l[CTL], mix_
  * perf_mute_sd) and passes DIST by (the spread of a distorted chord is its voices' clean difference). The sends
  * take b, mono, as before. SPRD 0, MONO or LEGATO: mix_part's own loop, bit for bit as before. The cost: a block's
  * clear and sum of spread_buf, the side and a wider mix loop, per part; per voice none (it picks its buffer) */
-static __attribute__((noinline)) void mix_spread(track_t *t, int32_t *b, uint32_t n)
+static __attribute__((noinline)) void mix_spread(track_t *t, int32_t *b, uint32_t n, mixsum_t *sm)
 {
-    int32_t *d = spread_buf;
+    int32_t *d = spread_buf[(uint32_t)(t - trk) % NTRK];
     uint32_t i;
     int32_t lvl = LEVEL_Q12[t->p[P_LEVEL] & 127], pan = t->p[P_PAN], s = (t->p[P_SPRD] + 1) >> 1;
     int32_t pa = clamp(pan - s, -64, 63), pb = clamp(pan + s, -64, 63);
@@ -817,38 +826,52 @@ static __attribute__((noinline)) void mix_spread(track_t *t, int32_t *b, uint32_
         if (a > pk)
             pk = a;
         if (c)
-            send_c[i] += mulq15(xs, c);
+            sm->c[i] += mulq15(xs, c);
         if (dl)
-            send_d[i] += mulq15(xs, dl);
+            sm->d[i] += mulq15(xs, dl);
         if (r)
-            send_r[i] += mulq15(xs, r);
-        mix_l[i] += ((x * glm) >> 12) + ((y * gld) >> 12);
-        mix_r[i] += ((x * grm) >> 12) + ((y * grd) >> 12);
+            sm->v[i] += mulq15(xs, r);
+        sm->l[i] += ((x * glm) >> 12) + ((y * gld) >> 12);
+        sm->r[i] += ((x * grm) >> 12) + ((y * grd) >> 12);
     }
     t->peak = pk;
 }
 
-/* one synth part into the dry mix and the sends; a part with no voice sounding costs
+/* a part's cost for the second core's split (mix_split, after Jangada's): its voices x its engine's cost per
+ * voice (ENG_VCOST: the host's instructions per sample, tests/regress.c CPU at 8 notes held less the idle mix, over the
+ * engine's voices), and the DIST, INSERT and sends while it sounds or its tail runs. ENGINES[] order; DIGITAL as FM6
+ * when built, nothing when retired. An estimate: it only steers the split, the sound does not depend on it */
+static uint16_t part_cost[NTRK];                        /* the last block's, per part */
+static const uint16_t ENG_VCOST[NENGINES] = {163, FELUCCA_FM4 ? 181 : 0, 162, 67, 70, 174, 144, 143, 189, 309, 113, 134,
+                                             181,
+#if FELUCCA_SLICE
+                                             129
+#endif
+};
+
+/* one synth part into the dry mix and the sends of sm (mx[0]; mx[1] on the second core); a part with no voice sounding costs
  * the LFO tick and a cleared buffer only (after the DIST tail has run out) */
-static void mix_part(track_t *t, uint32_t n)
+static void mix_part(track_t *t, uint32_t n, mixsum_t *sm)
 {
-    int32_t *b = part_buf;
-    uint32_t i;
+    int32_t *b = sm->b;
+    uint32_t i, nr;
     mod_begin(t);                                       /* the matrix's per-block values into t->p (mod.c) */
-    spread_on = t->p[P_SPRD] > 0 && (trk_vmode(t) == V_POLY || trk_vmode(t) == V_UNISON);   /* (SPREAD, mix_spread) */
-    if (track_render(t, b, n))
+    t->spread_on = t->p[P_SPRD] > 0 && (trk_vmode(t) == V_POLY || trk_vmode(t) == V_UNISON);   /* (SPREAD, mix_spread) */
+    nr = track_render(t, b, n);
+    part_cost[(uint32_t)(t - trk) % NTRK] = (uint16_t)(nr * ENG_VCOST[t->engine % NENGINES] + (nr || t->tail ? 60u : 0u));
+    if (nr)
         t->tail = t->p[P_ITYPE] ? 64 : 16;              /* blocks of DIST / INSERT state to run out after the last
                                                          * voice (the INSERT's: 46 ms, a flanger's feedback) */
     else if ((!t->tail || !(t->p[P_DIST] | t->p[P_ITYPE]) || !--t->tail) && !slicer_busy(t)) {
         slicer_track(t, 0, n);                          /* (the SLICER's step clock runs on) */
         if (t->ins_run && !t->p[P_ITYPE])
             ins_rest(t);                                /* TYPE OFF while silent: no fade-out left for the next note */
-        if (mod.on)
+        if (MOD(t).on)
             mod_end(t);
         return;
     }
-    if (spread_on)
-        mix_spread(t, b, n);
+    if (t->spread_on)
+        mix_spread(t, b, n, sm);
     else {
         track_dist(t, b, n);
         if (t->p[P_ITYPE] | t->ins_run)
@@ -857,7 +880,7 @@ static void mix_part(track_t *t, uint32_t n)
         if ((pf.mute >> (t - trk)) & 1u)
             perf_mute((uint32_t)(t - trk), b, n);       /* perform.c: a black key in the FX layer */
     }
-    if (!spread_on) {                                   /* (the mix's values read after the calls: none is held over
+    if (!t->spread_on) {                                /* (the mix's values read after the calls: none is held over
                                                          * them, no spill in the loop: the ISR's cost as before 1.5) */
         int32_t lvl = LEVEL_Q12[t->p[P_LEVEL] & 127], pan = t->p[P_PAN];
         int32_t gl = 4096 - (pan > 0 ? pan * 64 : 0), gr = 4096 + (pan < 0 ? pan * 64 : 0);
@@ -870,19 +893,19 @@ static void mix_part(track_t *t, uint32_t n)
             if (a > pk)
                 pk = a;
             if (c)
-                send_c[i] += mulq15(xs, c);
+                sm->c[i] += mulq15(xs, c);
             if (d)
-                send_d[i] += mulq15(xs, d);
+                sm->d[i] += mulq15(xs, d);
             if (r)
-                send_r[i] += mulq15(xs, r);
-            mix_l[i] += (x * gl) >> 12;
-            mix_r[i] += (x * gr) >> 12;
+                sm->v[i] += mulq15(xs, r);
+            sm->l[i] += (x * gl) >> 12;
+            sm->r[i] += (x * gr) >> 12;
         }
         t->peak = pk;
     }
     if (pf.thr)
-        perf_throw(t, b, send_d, send_r, n);            /* perform.c: REV / ECHO THROW (1.5.1), the sends towards full */
-    if (mod.on)
+        perf_throw(t, b, sm->d, sm->v, n);              /* perform.c: REV / ECHO THROW (1.5.1), the sends towards full */
+    if (MOD(t).on)
         mod_end(t);                                     /* the stored values back */
 }
 
@@ -919,17 +942,90 @@ static __attribute__((noinline)) void perf_master(int32_t *out, uint32_t n)
     }
 }
 
+/* ---- the second core (hal/fm1_cpu1.h; after Jangada's, github.com/zednaked/jangada, GPL-3.0) renders some of
+ * the parts of each block into its own sums (mx[1]) while this core renders the others; then this core adds them in
+ * and goes on (the LFOs' blocks, the FX layer, the buses, the master) as with one core. The sums are integers, so the
+ * order they add up in changes nothing: the output is bit for bit one core's. A part's render touches its own state
+ * only (its track_t with its SPREAD, ENV SYNC and LFO phase, its voices, its matrix: mod.c MOD, its SPREAD buffer,
+ * its engine's memory) and what nobody writes meanwhile (song, the tables); what parts share is done before the
+ * split (events_block: the notes, voice stealing; the FX layer's perf_begin) or after it (the LFOs' S&H draw from the
+ * shared generator, part by part: voice.c track_lfo_end). tests/dualcore_test.c checks it, under ThreadSanitizer too.
+ * Without a second core (the host, the browser, MENU > 2ND CORE OFF, one that did not answer or stopped) C1_RUN takes
+ * nothing and this core renders them all */
+#ifndef C1_RUN
+#define C1_ON() 0                                       /* a second core is answering */
+#define C1_RUN(fn, arg) 0                               /* hand it fn(arg): 1 = taken */
+#define C1_WAIT() 0                                     /* wait for it: 0 = done */
+#endif
+#ifndef C1_SPLIT
+#define C1_SPLIT() mix_split()
+#endif
+static uint32_t c1_blocks;                              /* blocks the second core took parts of (console) */
+
+static void c1_parts(uint32_t arg)                      /* arg: the parts (bit k = part k) | n << 8 */
+{
+    uint32_t i, n = arg >> 8;
+    mixsum_t *sm = &mx[1];
+    for (i = 0; i < n; i++)
+        sm->l[i] = sm->r[i] = sm->c[i] = sm->d[i] = sm->v[i] = 0;
+    for (i = 0; i < NPART; i++)
+        if (arg >> i & 1u)
+            mix_part(&trk[i], n, sm);
+}
+
+/* which parts go to the second core: the split of the last block's costs that leaves the busier core the least; none
+ * when that saves less than handing them over costs (C1_HAND) */
+#define C1_HAND 40u
+static uint32_t mix_split(void)
+{
+    uint32_t m, i, best = 0, all = 0, lo;
+    for (i = 0; i < NPART; i++)
+        all += part_cost[i];
+    lo = all;
+    for (m = 1; m < (1u << NPART) - 1u; m++) {
+        uint32_t a = 0, w;
+        for (i = 0; i < NPART; i++)
+            if (m >> i & 1u)
+                a += part_cost[i];
+        w = (a > all - a ? a : all - a) + C1_HAND;
+        if (w < lo) {
+            lo = w;
+            best = m;
+        }
+    }
+    return best;
+}
+
 static void mix_block(int32_t *out, uint32_t n)
 {
-    uint32_t i;
+    uint32_t i, m;
     int perf;
     int32_t mg = fx_usb_fixed ? MASTER_FULL : (int32_t)song.master_q12;   /* (USB LEVEL FIXED: MASTER after) */
     for (i = 0; i < n; i++)
         send_c[i] = send_d[i] = send_r[i] = mix_l[i] = mix_r[i] = 0;
     events_block(n);
     perf = perf_begin(n);                               /* the FX hold layer at work (perform.c) */
+    m = C1_ON() ? C1_SPLIT() & ((1u << NPART) - 1u) : 0u;
+    if (m && !C1_RUN(c1_parts, m | n << 8))
+        m = 0;
+    c1_blocks += m != 0;
     for (i = 0; i < NPART; i++)
-        mix_part(&trk[i], n);
+        if (!(m >> i & 1u))
+            mix_part(&trk[i], n, &mx[0]);
+    if (m) {
+        const mixsum_t *sm = &mx[1];
+        if (C1_WAIT())                                  /* it stopped answering (held from now on): its parts here */
+            c1_parts(m | n << 8);
+        for (i = 0; i < n; i++) {
+            mix_l[i] += sm->l[i];
+            mix_r[i] += sm->r[i];
+            send_c[i] += sm->c[i];
+            send_d[i] += sm->d[i];
+            send_r[i] += sm->v[i];
+        }
+    }
+    for (i = 0; i < NPART; i++)                         /* the LFOs' blocks, part by part (voice.c) */
+        track_lfo_end(&trk[i]);
     if (perf)
         perf_pre(mix_l, mix_r, send_d, send_r, n);
     fx_buses(send_c, send_d, send_r, wet, n);

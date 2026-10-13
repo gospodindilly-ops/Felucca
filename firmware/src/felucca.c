@@ -34,6 +34,9 @@
 #ifndef FELUCCA_VERSION
 #define FELUCCA_VERSION "v1.6" /* shown in the menu, the console and the editor; build.py --release X.Y */
 #endif
+#ifndef FELUCCA_CPU2
+#define FELUCCA_CPU2 1             /* the second core renders some parts (hal/fm1_cpu1.h, fx.c mix_block; MENU > 2ND CORE) */
+#endif
 #if FELUCCA_OTA && !FELUCCA_FLASH
 #error "FELUCCA_OTA needs FELUCCA_FLASH"
 #endif
@@ -44,6 +47,12 @@
 #include "fm1_sys.h"
 #include "fm1_irq.h"
 #include "fm1_guard.h"
+#include "fm1_cpu1.h"
+#if FELUCCA_CPU2
+#define C1_ON() fm1_c1_on                    /* fx.c mix_block: a second core is answering */
+#define C1_RUN(fn, arg) fm1_cpu1_run(fn, arg)
+#define C1_WAIT() fm1_cpu1_wait()
+#endif
 #include "fm1_input.h"
 #include "fm1_timer.h"
 #include "fm1_audio.h"

@@ -112,6 +112,35 @@ cost (`tests/cpu_baseline.txt`, `tests/target_budget.txt`). After an intended ch
 the sound, `GOLDEN_UPDATE=1 sh tests/run_tests.sh` rewrites the hashes; `BUDGET_UPDATE=1`
 does the same for the cost files.
 
+## The second core
+
+The AC79 has two cores; Felucca used one. Now the second core renders some of the four parts of every block while the
+first renders the others (`fx.c` `mix_block`), then the first adds them in and goes on (the FX layer, the buses, the
+master). The hardware side is X0X's (`hal/fm1_cpu1.{h,S}`, after Melodee's dual-core audio), the split Jangada's; both
+GPL-3.0.
+
+- **The split**: each block, the parts go to the core that leaves the busier one the least, by the last block's cost
+  (voices × the engine's cost per voice, `ENG_VCOST`); none when that saves less than handing them over.
+- **The same sound**: a part's render touches only its own state (its `track_t`, its voices, its matrix `MOD(t)`,
+  its SPREAD buffer, its engine memory; FORMANT's noise and PHYS's reset seed per part, FM6's buses on the stack).
+  What parts share happens before the split (notes, voice stealing, the matrix's VEL and TIME) or after it (the LFOs'
+  S&H draw from the shared generator, part by part: `voice.c` `track_lfo_end`). The sums are integers, so the output
+  is bit for bit one core's. `tests/dualcore_test.c` renders 4 parts of every preset and mixes (INSERTs, SLICER,
+  SPREAD, the matrix, S&H, ENV SYNC, a PHYS model change under a note) on one core and with a thread as core 1 over
+  every split; `regress` built with `-DC1_HOST` renders the golden set that way. `TSAN=1 sh tests/run_tests.sh` runs
+  the first under ThreadSanitizer too (several minutes).
+- **Units that cannot run it**: on some FM-1s core 1 reads RAM wrong (found by Jangada, measured on X0X and
+  Melodee). Core 1 runs only the next job, and only when its check word matches; the first wrong one, or a job not
+  back within 4 ms, holds it, and that block's parts are rendered by core 0. A fault on core 1 writes the crash
+  record (`core` 1) and stops there; core 0 goes on. **MENU > SYSTEM > 2ND CORE**: AUTO (default) or OFF; AUTO turns
+  itself OFF (saved) on such a unit ("2ND CORE MISREAD: ONE CORE"). A crash in the last boot's first 30 s starts it
+  on one core. No raised supply (Jangada's BOOST): it is not done here.
+- **Where it runs**: its waiting loop is in RAM (`.c1_text`, so an idle core 1 never fetches from the flash). It works
+  only inside the audio interrupt, which waits for it; the flash is switched off only with interrupts off, so never
+  under it. `fm1_cstart` holds it before the RAM is cleared.
+- USB console `status`: `cpu2` (running), `cpu2_gave_up` (1 misread, 2 timeout), `cpu2_bad`, `cpu2_blocks`,
+  `cpu2_wait_max_us`, `cpu2_stack`. `FELUCCA_CPU2=0 ./build.sh`: never started.
+
 ## Install
 
 Use the web installer in Chrome or Edge:

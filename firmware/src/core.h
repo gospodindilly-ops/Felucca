@@ -382,7 +382,12 @@ typedef struct track {
     uint8_t tail;                /* blocks to mix after the last voice (the DIST / INSERT tail) */
     uint8_t ins_run;             /* the INSERT still sounds (fx.c track_insert: its wet share above 0) */
     uint8_t cond_loop;           /* 1.5.5 (#209): the loop of its LEN playing (0..COND_LOOPS - 1, seq.c seq_tick) */
-    uint8_t rsv_sz[14];          /* (sizeof(track_t) a multiple of 16: below) */
+    /* the second core: a part's render state, its own, so the two cores' parts share nothing (fx.c mix_block); in
+     * the pad that keeps sizeof(track_t) a multiple of 16 (14 bytes before) */
+    uint8_t lfo_wrap;            /* the LFO's phase wrapped this block: its S&H is drawn after the parts (voice.c) */
+    uint32_t esync_k[3];         /* ATK's step, DEC's and REL's coefficient (Q16) this block (voice.c esync_coef) */
+    uint8_t spread_on;           /* SPREAD this block (fx.c mix_part, voice.c track_render) */
+    uint8_t rsv_sz[1];           /* (sizeof(track_t) a multiple of 16: below) */
     int16_t armp, aholdp;        /* P_AMODE / P_AHOLD as last seen by the ISR */
     /* engine switch (voice.c engine_block): the old engine's voices fade out, then it switches */
     uint8_t xf_on, xf;           /* fading; blocks of the fade still to render */

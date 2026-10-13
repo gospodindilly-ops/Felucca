@@ -207,12 +207,13 @@ static void fl_plain_window_init(void) {}
 #include "../../firmware/src/project.c"
 
 /* ------------------------------------------------- main.c and its HAL --- */
-typedef struct { uint32_t magic, count, vec, pc, emu, dbg, rets; } fm1_crash_t;
+typedef struct { uint32_t magic, count, vec, pc, emu, dbg, rets, core; } fm1_crash_t;
 #define FM1_CRASH_MAGIC 0x43525348u
 static fm1_crash_t fm1_crash;                     /* (none: main.c boot_leds runs the sweep) */
 static struct { uint8_t p3_rst, wdt_con; uint32_t rst_src; } fm1_boot;
 uint32_t _data_start[1], _data_end[1], _data_load[1], _bss_start[1], _bss_end[1];
 uint32_t _pool_start[1], _pool_end[1], _rt_start[1], _rt_end[1], _rt_load[1];
+uint32_t _c1_start[1], _c1_end[1], _c1_load[1];
 static uint32_t web_master_adc = 700;   /* MASTER, 0..1023 as the ADC reads it */
 enum { FM1_ADC_BATT = 3, FM1_ADC_MASTER = 4 };
 static int32_t fm1_adc_read(uint32_t ch) { return ch == FM1_ADC_MASTER ? (int32_t)web_master_adc : 620; }
@@ -230,6 +231,14 @@ static void fm1_reset_reason(void) {}
 static void fm1_wdt_arm(uint32_t v) { (void)v; }
 static void fm1_mailbox_clear(void) {}
 static void fm1_guard_enable(uint32_t m) { (void)m; }
+/* the second core (hal/fm1_cpu1.h): none here, one core (fx.c mix_block's C1_ON() is 0 without felucca.c's macros) */
+static uint8_t fm1_c1_on, fm1_c1_gave_up;
+static uint32_t fm1_c1_wait_max;
+static struct { uint32_t bad; } fm1_c1_mb;
+static void fm1_cpu1_halt(void) {}
+static int fm1_cpu1_start(void) { return -1; }
+static void fm1_guard_pc_open(void) {}
+static uint32_t fm1_cpu1_stack_used(void) { return 0; }
 enum { FM1_GUARD_STACK = 1, FM1_GUARD_WRITE = 2, FM1_GUARD_BUS = 4, FM1_GUARD_PC = 8 };
 #if FELUCCA_CDC
 static void cdc_task(void) {}

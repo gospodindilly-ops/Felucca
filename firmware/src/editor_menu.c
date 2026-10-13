@@ -36,6 +36,7 @@ static const uint8_t ED_MENU[][2] = {
                                                        * as MIDI IN: 1..16 OMNI OFF (values 0..17), MIDI */
     {MI_MFOLLOW, 30},                                  /* 1.5.5 (#208): AUTO SELECT OFF / ON, a setting, MIDI */
     {MI_SCRWAKE, 31},                                  /* 1.5.5: SCREEN WAKE +MIDI / PANEL, a setting, MIDI */
+    {MI_CPU2, 32},                                     /* the second core (Discussion #141): 2ND CORE AUTO / OFF, SYSTEM */
 };
 #define ED_MENU_N NELEM(ED_MENU)
 

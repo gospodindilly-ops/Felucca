@@ -8,7 +8,7 @@
  *    cutoff; RES raises BP's peak), bounded and without DC at the corners (RES and DRV 127, low and high notes, every
  *    WAVE, SYNC and SUB too), a TYPE change while a note sounds stays bounded.
  * 2. ENV SYNC (P_ESYNC, voice.c esync_coef): the parameter (OFF / ON, default OFF, not recordable, ENV DEST's KNOB 4);
- *    OFF takes the tables whatever esync_k holds (bit for bit); ON: ATK DEC REL show note values (1/64T .. 4BAR, 25
+ *    OFF takes the tables whatever t->esync_k holds (bit for bit); ON: ATK DEC REL show note values (1/64T .. 4BAR, 25
  *    names over 0..127, a knob detent each), and the attack reaches the top, the decay and the release -40 dB, after
  *    that note value at 60 / 120 / 173 BPM and on the external clock's measured tempo (within a block / 2 %).
  * 3. the cost: ANALOG 8 voices LP / BP / HP, ENV SYNC on / off (instructions per sample).
@@ -79,9 +79,8 @@ static void fresh(uint32_t e, uint32_t pi)        /* the boot state (no FX tails
     rng_state = 0x1234567u;
     mod_seed = 0x2545F491u;
     memset(trk, 0, sizeof trk);
-    memset(&mod, 0, sizeof mod);
+    memset(mod_w, 0, sizeof mod_w);
     memset(sl, 0, sizeof sl);
-    memset(esync_k, 0, sizeof esync_k);
     host_tracks_init();
     for (k = 0; k < NPART; k++)
         host_preset(&trk[k], k ? 0u : e, k ? 0u : pi);
@@ -299,10 +298,9 @@ static void test_filter(void)
 /* ------------------------------------------------------------------ 2 --- */
 static void esync_garbage(track_t *t)
 {
-    (void)t;
-    esync_k[0] = 0x123456u;
-    esync_k[1] = 999u;
-    esync_k[2] = 77u;
+    t->esync_k[0] = 0x123456u;
+    t->esync_k[1] = 999u;
+    t->esync_k[2] = 77u;
 }
 static int32_t value_of(const char *name)        /* the first value 0..127 ENV SYNC shows as name */
 {

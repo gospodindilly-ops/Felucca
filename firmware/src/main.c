@@ -4,6 +4,7 @@
  * guards; then LCD, input (TIMER5 IRQ, 10 kHz), audio (ALNK0 IRQ). */
 extern uint32_t _data_start[], _data_end[], _data_load[], _bss_start[], _bss_end[];
 extern uint32_t _pool_start[], _pool_end[], _rt_start[], _rt_end[], _rt_load[];
+extern uint32_t _c1_start[], _c1_end[], _c1_load[];
 
 
 /* TIMER5 outranks ALNK0, so the scan keeps its 100 us pace while a half buffer renders: before,
@@ -136,7 +137,8 @@ static uint8_t boot_clean;                    /* no crash, hang (WDT) or failed 
                                                * the sweep runs and the autosave is restored (project.c autosave_boot) */
 static void boot_leds(void)
 {
-    uint32_t crashed = fm1_crash.magic == FM1_CRASH_MAGIC && fm1_crash.count != crash_seen;
+    uint32_t crashed = fm1_crash.magic == FM1_CRASH_MAGIC && fm1_crash.count != crash_seen
+                       && fm1_crash.core != 1u;   /* (the second core's own fault left core 0 playing) */
     crash_seen = fm1_crash.count;
     boot_clean = !crashed && !bootguard.failed && !(fm1_boot.p3_rst & 4u);
     fm1_led_dim_level(settings_leds == LEDS_DIM_LO);
@@ -175,6 +177,16 @@ static void fm1_main(void)
     felucca_init();
     master_boot();
     kb_boot_hold = 1;                         /* #137: no notes from the keys before the UI (seq.c keyboard_block) */
+#if FELUCCA_CPU2
+    if (!bootguard.failed && !(ui_prefs2 & (PREF_CPU2_OFF >> 16))) {
+        /* the second core (hal/fm1_cpu1.h; fx.c mix_block hands it parts), at power-on, before the audio and
+         * the timers (started later it never reaches its entry). It starts in the chip's ROM: the PC limits open
+         * meanwhile. MENU > 2ND CORE OFF, a crash in the last boot's first 30 s, or no answer: one core, as before */
+        fm1_guard_pc_open();
+        fm1_cpu1_start();
+        fm1_guard_enable(FM1_GUARD_PC);
+    }
+#endif
     audio_init();
     usb_start();
 #if FELUCCA_UART
@@ -206,6 +218,14 @@ static void fm1_main(void)
             bootguard.pending = 0;
             bootguard.failed = 0;
         }
+#if FELUCCA_CPU2
+        if (*(volatile uint8_t *)&fm1_c1_gave_up && !(ui_prefs2 & (PREF_CPU2_OFF >> 16))) {   /* (the ISR's) */
+            ui_prefs2 |= PREF_CPU2_OFF >> 16;           /* AUTO: core 1 misread or stopped answering on this FM-1: */
+            cpu2_parked = 1;                            /* one core from now on (MENU > 2ND CORE AUTO tries again) */
+            settings_later();
+            ui_message("2ND CORE MISREAD: ONE CORE");
+        }
+#endif
         {
             int32_t b = fm1_adc_read(FM1_ADC_BATT);     /* battery: slow IIR */
             if (b > 0)
@@ -291,6 +311,9 @@ static void fm1_main(void)
 void fm1_cstart(void)
 {
     uint32_t *s, *d, p3, src, wdt;
+    fm1_cpu1_halt();                           /* (after Jangada, X0X): a second core still running from before
+                                                * this reset (a watchdog, a fault, another firmware) would read the RAM
+                                                * cleared below */
     fm1_time_init();
     fm1_reset_reason();
     p3 = fm1_boot.p3_rst;
@@ -319,6 +342,8 @@ void fm1_cstart(void)
         *d = *s;
     for (s = _rt_load, d = _rt_start; d < _rt_end; s++, d++)
         *d = *s;                                /* flash driver code that must run from RAM */
+    for (s = _c1_load, d = _c1_start; d < _c1_end; s++, d++)
+        *d = *s;                                /* the second core's waiting loop (hal/fm1_cpu1.h) */
     fm1_mailbox_clear();
     fm1_guard_enable(FM1_GUARD_STACK | FM1_GUARD_WRITE | FM1_GUARD_BUS | FM1_GUARD_PC);
     fm1_boot.p3_rst = (uint8_t)p3;

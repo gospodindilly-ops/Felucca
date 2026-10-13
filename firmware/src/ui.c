@@ -81,6 +81,9 @@ static uint32_t up_gen;                      /* bumped on every user bank change
 #define PREF_SEL_PAGE (0x10u << 16)
 #define PREF_WAKE_PANEL (0x20u << 16)
 #define PREF_SEL_HI (0x40u << 16)
+#define PREF_CPU2_OFF (0x80u << 16)             /* MENU > SYSTEM > 2ND CORE OFF: one core from the next power-on
+                                                 * (main.c); AUTO turns itself OFF when core 1 misreads (hal/fm1_cpu1.h) */
+static uint8_t cpu2_parked;                     /* AUTO turned itself OFF this session (main.c) */
 /* MENU > CONTROL > SELECT: 0 BPM, 1 PAGE (1.5.5, #188), 2 MODW, 3 VEL (1.5.6, #84: ui_input.c sel_play), bit 4 and bit 6 of
  * ui_prefs2 (0 in every older setting = BPM; 1.5.5's PAGE keeps its bit; firmware before 1.5.6 reads MODW as BPM and
  * VEL as PAGE (its bit 4), before 1.5.5 both as BPM) */
